@@ -63,10 +63,9 @@ pub fn transcribe(
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
-        if let Some(ref lang) = config.transcription.language {
-            params.set_language(Some(lang));
-        } else {
-            params.set_language(Some("en"));
+        match config.transcription.language.as_deref() {
+            Some("auto") | None => params.set_language(Some("auto")),
+            Some(lang) => params.set_language(Some(lang)),
         }
 
         if let Some(ref prompt) = config.transcription.initial_prompt {
