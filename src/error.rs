@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum AppError {
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
@@ -27,4 +28,5 @@ pub enum AppError {
     Io(#[from] std::io::Error),
 }
 
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, AppError>;

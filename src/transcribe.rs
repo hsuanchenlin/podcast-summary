@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result};
+use ferrous_opencc::{OpenCC, config::BuiltinConfig};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::audio;
@@ -11,7 +12,11 @@ use crate::config::AppConfig;
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 /// Transcribe an audio file to text using local whisper.cpp.
-pub fn transcribe(audio_path: &Path, config: &AppConfig, progress: Arc<AtomicI32>) -> Result<String> {
+pub fn transcribe(
+    audio_path: &Path,
+    config: &AppConfig,
+    progress: Arc<AtomicI32>,
+) -> Result<String> {
     let model_path = ensure_model(config)?;
     let samples = audio::decode_to_whisper_format(audio_path)
         .with_context(|| format!("Failed to decode audio: {}", audio_path.display()))?;
@@ -64,14 +69,44 @@ pub fn transcribe(audio_path: &Path, config: &AppConfig, progress: Arc<AtomicI32
 
     let mut transcript = String::new();
     for i in 0..n_segments {
-        if let Some(segment) = state.get_segment(i) {
-            if let Ok(text) = segment.to_str_lossy() {
-                transcript.push_str(&text);
-            }
+        if let Some(segment) = state.get_segment(i)
+            && let Ok(text) = segment.to_str_lossy()
+        {
+            transcript.push_str(&text);
         }
     }
 
-    Ok(transcript.trim().to_string())
+    let transcript = transcript.trim().to_string();
+    let transcript = convert_chinese(&transcript, config)?;
+    Ok(transcript)
+}
+
+/// Convert Chinese characters if configured (e.g. Simplified → Traditional).
+fn convert_chinese(text: &str, config: &AppConfig) -> Result<String> {
+    let Some(ref variant) = config.transcription.chinese_conversion else {
+        return Ok(text.to_string());
+    };
+
+    let builtin = match variant.to_lowercase().as_str() {
+        "s2t" => BuiltinConfig::S2t,
+        "s2tw" => BuiltinConfig::S2tw,
+        "s2twp" => BuiltinConfig::S2twp,
+        "s2hk" => BuiltinConfig::S2hk,
+        "t2s" => BuiltinConfig::T2s,
+        "tw2s" => BuiltinConfig::Tw2s,
+        "tw2sp" => BuiltinConfig::Tw2sp,
+        "hk2s" => BuiltinConfig::Hk2s,
+        "t2tw" => BuiltinConfig::T2tw,
+        "t2hk" => BuiltinConfig::T2hk,
+        _ => anyhow::bail!(
+            "Unknown chinese_conversion variant: {variant}\n\
+             Valid values: s2t, s2tw, s2twp, s2hk, t2s, tw2s, tw2sp, hk2s, t2tw, t2hk"
+        ),
+    };
+
+    let cc = OpenCC::from_config(builtin)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize OpenCC: {e}"))?;
+    Ok(cc.convert(text))
 }
 
 /// Ensure the whisper model file exists, downloading if needed.

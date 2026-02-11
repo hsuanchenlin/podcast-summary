@@ -30,13 +30,16 @@ pub async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<FeedInfo>
         .await
         .with_context(|| format!("Failed to read feed body: {url}"))?;
 
-    let feed = feed_rs::parser::parse(&bytes[..])
-        .map_err(|e| crate::error::AppError::FeedParse {
+    let feed =
+        feed_rs::parser::parse(&bytes[..]).map_err(|e| crate::error::AppError::FeedParse {
             url: url.to_string(),
             msg: e.to_string(),
         })?;
 
-    let title = feed.title.map(|t| t.content).unwrap_or_else(|| "Untitled".to_string());
+    let title = feed
+        .title
+        .map(|t| t.content)
+        .unwrap_or_else(|| "Untitled".to_string());
     let website_url = feed.links.first().map(|l| l.href.clone());
     let description = feed.description.map(|d| d.content);
 
@@ -61,24 +64,34 @@ pub async fn fetch_feed(client: &reqwest::Client, url: &str) -> Result<FeedInfo>
                 }
             });
 
-            let audio_url = audio_url_from_media
-                .or_else(|| {
-                    // Fallback: check entry links for audio enclosures
-                    entry.links.iter().find(|l| {
-                        l.media_type.as_ref().is_some_and(|m| m.starts_with("audio/"))
+            let audio_url = audio_url_from_media.or_else(|| {
+                // Fallback: check entry links for audio enclosures
+                entry
+                    .links
+                    .iter()
+                    .find(|l| {
+                        l.media_type
+                            .as_ref()
+                            .is_some_and(|m| m.starts_with("audio/"))
                             || l.rel.as_deref() == Some("enclosure")
-                    }).map(|l| l.href.clone())
-                })?;
+                    })
+                    .map(|l| l.href.clone())
+            })?;
 
             let guid = entry.id;
-            let title = entry.title.map(|t| t.content).unwrap_or_else(|| "Untitled".to_string());
+            let title = entry
+                .title
+                .map(|t| t.content)
+                .unwrap_or_else(|| "Untitled".to_string());
             let description = entry.summary.map(|s| s.content);
             let published_at = entry.published.or(entry.updated);
 
             // Parse duration from media content
-            let duration_secs = entry.media.iter().flat_map(|m| &m.content).find_map(|c| {
-                c.duration.map(|d| d.as_secs() as i64)
-            });
+            let duration_secs = entry
+                .media
+                .iter()
+                .flat_map(|m| &m.content)
+                .find_map(|c| c.duration.map(|d| d.as_secs() as i64));
 
             Some(FeedEntry {
                 guid,

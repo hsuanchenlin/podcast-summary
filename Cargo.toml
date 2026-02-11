@@ -50,3 +50,6 @@ symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "pcm"] }
 
 # Transcription (local whisper.cpp)
 whisper-rs = "0.15"
+
+# Chinese character conversion (Simplified ↔ Traditional)
+ferrous-opencc = "0.3"

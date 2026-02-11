@@ -140,11 +140,26 @@ async fn run_single_episode(
     println!("Processing: \"{}\" ({})", episode.title, podcast.title);
 
     // Download if needed
-    let audio_path = if episode.audio_path.is_some()
-        && std::path::Path::new(episode.audio_path.as_ref().unwrap()).exists()
-    {
-        println!("  Audio already downloaded.");
-        PathBuf::from(episode.audio_path.as_ref().unwrap())
+    let audio_path = if let Some(ref existing) = episode.audio_path {
+        let p = std::path::Path::new(existing);
+        if p.exists() {
+            println!("  Audio already downloaded.");
+            PathBuf::from(existing)
+        } else {
+            println!("  Downloading...");
+            let audio_dir = config.audio_dir()?;
+            let path = download::download_episode(
+                client,
+                &episode.audio_url,
+                &audio_dir,
+                episode.podcast_id,
+            )
+            .await?;
+            let path_str = path.to_string_lossy().to_string();
+            db.update_episode_audio_path(ep_id, &path_str)?;
+            println!("  Downloaded.");
+            path
+        }
     } else {
         println!("  Downloading...");
         let audio_dir = config.audio_dir()?;
@@ -163,11 +178,57 @@ async fn run_single_episode(
     }
 
     // Transcribe if needed
-    let transcript = if episode.transcript_path.is_some()
-        && std::path::Path::new(episode.transcript_path.as_ref().unwrap()).exists()
-    {
-        println!("  Transcript already exists.");
-        std::fs::read_to_string(episode.transcript_path.as_ref().unwrap())?
+    let transcript = if let Some(ref existing) = episode.transcript_path {
+        let p = std::path::Path::new(existing);
+        if p.exists() {
+            println!("  Transcript already exists.");
+            std::fs::read_to_string(existing)?
+        } else {
+            // Transcript path set but file missing, re-transcribe
+            let pb = ProgressBar::new(100);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  [{bar:30.cyan/dim}] {pos}% Transcribing...")
+                    .unwrap()
+                    .progress_chars("##-"),
+            );
+
+            let progress = Arc::new(std::sync::atomic::AtomicI32::new(0));
+            let progress_clone = progress.clone();
+
+            let audio_path_clone = audio_path.clone();
+            let config_clone = config.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                transcribe::transcribe(&audio_path_clone, &config_clone, progress_clone)
+            });
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let pct = progress.load(std::sync::atomic::Ordering::Relaxed);
+                pb.set_position(pct.max(0) as u64);
+                if handle.is_finished() {
+                    break;
+                }
+            }
+            let result = handle.await??;
+
+            pb.set_position(100);
+            pb.finish_and_clear();
+
+            let transcript_dir = config.transcript_dir()?;
+            let transcript_file = transcript_dir
+                .join(episode.podcast_id.to_string())
+                .join(format!("{ep_id}.txt"));
+            if let Some(parent) = transcript_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&transcript_file, &result)?;
+            db.update_episode_transcript_path(ep_id, &transcript_file.to_string_lossy())?;
+
+            let word_count = count_text_length(&result);
+            println!("  Transcribed ({word_count} words).");
+            result
+        }
     } else {
         let pb = ProgressBar::new(100);
         pb.set_style(
@@ -305,10 +366,7 @@ async fn download_episodes(
             }
             Err(e) => {
                 eprintln!("  Failed to download \"{title}\": {e}");
-                db.update_episode_status(
-                    ep_id,
-                    &EpisodeStatus::Failed(format!("download: {e}")),
-                )?;
+                db.update_episode_status(ep_id, &EpisodeStatus::Failed(format!("download: {e}")))?;
             }
         }
     }
@@ -474,4 +532,47 @@ fn is_cjk(c: char) -> bool {
         '\u{3000}'..='\u{303F}' |
         '\u{FF00}'..='\u{FFEF}'
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_text_length_english() {
+        assert_eq!(count_text_length("hello world foo bar"), 4);
+    }
+
+    #[test]
+    fn count_text_length_cjk() {
+        // All CJK chars - should count characters (excluding whitespace)
+        let text = "今天天氣很好我們去散步";
+        let result = count_text_length(text);
+        assert_eq!(result, 11);
+    }
+
+    #[test]
+    fn count_text_length_mixed_below_threshold() {
+        // Mostly English with a few CJK chars (below 30% threshold)
+        let text = "This is a long English sentence with one 字";
+        let result = count_text_length(text);
+        // CJK ratio is low, so word count
+        assert_eq!(result, text.split_whitespace().count());
+    }
+
+    #[test]
+    fn count_text_length_empty() {
+        assert_eq!(count_text_length(""), 0);
+    }
+
+    #[test]
+    fn count_text_length_whitespace_only() {
+        assert_eq!(count_text_length("   \n\t  "), 0);
+    }
+
+    #[test]
+    fn is_cjk_chinese_char() {
+        assert!(is_cjk('中'));
+        assert!(is_cjk('國'));
+    }
 }

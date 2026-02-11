@@ -41,11 +41,7 @@ pub fn decode_to_whisper_format(path: &Path) -> Result<Vec<f32>> {
 
     let track_id = track.id;
     let source_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let channels = track
-        .codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1);
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &Default::default())
@@ -127,4 +123,69 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stereo_to_mono_basic() {
+        // Stereo: [L, R, L, R] -> mono: [avg, avg]
+        let stereo = vec![1.0, 0.0, 0.5, 0.5];
+        let mono = stereo_to_mono(&stereo, 2);
+        assert_eq!(mono.len(), 2);
+        assert!((mono[0] - 0.5).abs() < f32::EPSILON);
+        assert!((mono[1] - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn stereo_to_mono_silence() {
+        let stereo = vec![0.0, 0.0, 0.0, 0.0];
+        let mono = stereo_to_mono(&stereo, 2);
+        assert_eq!(mono, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn stereo_to_mono_multichannel() {
+        // 4-channel: each frame is 4 samples
+        let samples = vec![1.0, 2.0, 3.0, 4.0]; // one frame
+        let mono = stereo_to_mono(&samples, 4);
+        assert_eq!(mono.len(), 1);
+        assert!((mono[0] - 2.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn resample_same_rate() {
+        let samples = vec![1.0, 2.0, 3.0];
+        let result = resample(&samples, 44100, 44100);
+        assert_eq!(result, samples);
+    }
+
+    #[test]
+    fn resample_empty() {
+        let result = resample(&[], 44100, 16000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resample_downsample_length() {
+        // 44100 -> 16000: output should be shorter
+        let samples: Vec<f32> = (0..44100).map(|i| i as f32 / 44100.0).collect();
+        let result = resample(&samples, 44100, 16000);
+        // Should be approximately 16000 samples
+        let expected_len = (44100.0_f64 * 16000.0 / 44100.0).ceil() as usize;
+        assert_eq!(result.len(), expected_len);
+    }
+
+    #[test]
+    fn resample_upsample_interpolation() {
+        // Simple case: 2 samples at rate 1 -> rate 2 should interpolate
+        let samples = vec![0.0, 1.0];
+        let result = resample(&samples, 1, 2);
+        // Should have ~4 samples with interpolated values
+        assert!(result.len() >= 3);
+        // First sample should be 0.0
+        assert!((result[0] - 0.0).abs() < f32::EPSILON);
+    }
 }

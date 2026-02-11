@@ -70,3 +70,21 @@ fn truncate_filename(name: &str, max: usize) -> String {
         format!("{truncated}...")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_filename_short() {
+        assert_eq!(truncate_filename("episode.mp3", 30), "episode.mp3");
+    }
+
+    #[test]
+    fn truncate_filename_long() {
+        let long_name = "this-is-a-very-long-episode-filename-that-exceeds-the-limit.mp3";
+        let result = truncate_filename(long_name, 20);
+        assert_eq!(result.chars().count(), 20);
+        assert!(result.ends_with("..."));
+    }
+}

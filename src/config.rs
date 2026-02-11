@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -34,6 +34,8 @@ pub struct TranscriptionConfig {
     /// Percentage of CPU threads to use (1-100, default 80)
     #[serde(default = "default_cpu_percent")]
     pub cpu_percent: u32,
+    /// Post-process transcription with OpenCC Chinese conversion (e.g. "s2twp" for Simplified → Taiwan Traditional)
+    pub chinese_conversion: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -100,6 +102,7 @@ impl Default for TranscriptionConfig {
             language: None,
             initial_prompt: None,
             cpu_percent: default_cpu_percent(),
+            chinese_conversion: None,
         }
     }
 }
@@ -112,16 +115,6 @@ impl Default for SummarizationConfig {
             model: default_model(),
             max_tokens: default_max_tokens(),
             system_prompt: None,
-        }
-    }
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            transcription: TranscriptionConfig::default(),
-            summarization: SummarizationConfig::default(),
         }
     }
 }
@@ -190,10 +183,85 @@ impl AppConfig {
 }
 
 fn shellexpand(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest).to_string_lossy().to_string();
-        }
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().to_string();
     }
     s.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_transcription_config() {
+        let config = TranscriptionConfig::default();
+        assert_eq!(config.whisper_model, "base");
+        assert!(config.language.is_none());
+        assert!(config.initial_prompt.is_none());
+        assert_eq!(config.cpu_percent, 80);
+    }
+
+    #[test]
+    fn default_summarization_config() {
+        let config = SummarizationConfig::default();
+        assert_eq!(config.api_key_env, "GEMINI_API_KEY");
+        assert_eq!(config.model, "gemini-2.0-flash");
+        assert_eq!(config.max_tokens, 4096);
+        assert!(config.system_prompt.is_none());
+    }
+
+    #[test]
+    fn default_general_config() {
+        let config = GeneralConfig::default();
+        assert!(config.data_dir.is_none());
+        assert_eq!(config.max_concurrent_downloads, 3);
+        assert!(config.auto_cleanup_audio);
+    }
+
+    #[test]
+    fn toml_roundtrip() {
+        let config = AppConfig::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            parsed.transcription.whisper_model,
+            config.transcription.whisper_model
+        );
+        assert_eq!(parsed.summarization.model, config.summarization.model);
+        assert_eq!(
+            parsed.general.auto_cleanup_audio,
+            config.general.auto_cleanup_audio
+        );
+    }
+
+    #[test]
+    fn partial_toml_uses_defaults() {
+        let toml_str = r#"
+[transcription]
+whisper_model = "large"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.transcription.whisper_model, "large");
+        // Rest should be defaults
+        assert_eq!(config.transcription.cpu_percent, 80);
+        assert_eq!(config.summarization.model, "gemini-2.0-flash");
+        assert_eq!(config.general.max_concurrent_downloads, 3);
+    }
+
+    #[test]
+    fn empty_toml_parses_to_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(config.transcription.whisper_model, "base");
+        assert_eq!(config.summarization.max_tokens, 4096);
+        assert!(config.general.auto_cleanup_audio);
+    }
+
+    #[test]
+    fn shellexpand_without_tilde() {
+        let result = shellexpand("/absolute/path");
+        assert_eq!(result, "/absolute/path");
+    }
 }

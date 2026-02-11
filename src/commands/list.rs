@@ -26,10 +26,7 @@ pub fn run(name: Option<&str>, config: &AppConfig) -> Result<()> {
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_else(|| "          ".to_string());
 
-            let duration = ep
-                .duration_secs
-                .map(|d| format_duration(d))
-                .unwrap_or_default();
+            let duration = ep.duration_secs.map(format_duration).unwrap_or_default();
 
             let status = match &ep.status {
                 crate::models::EpisodeStatus::New => "[new]",
@@ -103,5 +100,51 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max - 3).collect();
         format!("{truncated}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_minutes_only() {
+        assert_eq!(format_duration(300), "5m");
+        assert_eq!(format_duration(59 * 60), "59m");
+    }
+
+    #[test]
+    fn format_duration_hours_and_minutes() {
+        assert_eq!(format_duration(3600), "1h00m");
+        assert_eq!(format_duration(3661), "1h01m");
+        assert_eq!(format_duration(7200 + 1800), "2h30m");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        assert_eq!(format_duration(0), "0m");
+    }
+
+    #[test]
+    fn truncate_short_string() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_length() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string() {
+        assert_eq!(truncate("hello world!", 8), "hello...");
+    }
+
+    #[test]
+    fn truncate_unicode() {
+        // Unicode chars should be counted properly
+        let s = "你好世界測試文字串";
+        let result = truncate(s, 6);
+        assert_eq!(result, "你好世...");
     }
 }

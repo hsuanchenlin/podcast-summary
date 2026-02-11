@@ -58,20 +58,18 @@ async fn main() -> Result<()> {
         } => {
             commands::show::run(*episode_id, *transcript, &config)?;
         }
-        Command::Config { action } => {
-            match action {
-                Some(ConfigAction::Path) => {
-                    println!("{}", config::AppConfig::config_path()?.display());
-                }
-                Some(ConfigAction::Set { key, value }) => {
-                    commands::config_set::run(key, value)?;
-                }
-                Some(ConfigAction::Show) | None => {
-                    let content = toml::to_string_pretty(&config)?;
-                    println!("{content}");
-                }
+        Command::Config { action } => match action {
+            Some(ConfigAction::Path) => {
+                println!("{}", config::AppConfig::config_path()?.display());
             }
-        }
+            Some(ConfigAction::Set { key, value }) => {
+                commands::config_set::run(key, value)?;
+            }
+            Some(ConfigAction::Show) | None => {
+                let content = toml::to_string_pretty(&config)?;
+                println!("{content}");
+            }
+        },
     }
 
     Ok(())

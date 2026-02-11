@@ -77,3 +77,61 @@ pub struct Summary {
     pub output_tokens: Option<i64>,
     pub created_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_as_str_new() {
+        assert_eq!(EpisodeStatus::New.as_str(), "new");
+    }
+
+    #[test]
+    fn status_as_str_downloaded() {
+        assert_eq!(EpisodeStatus::Downloaded.as_str(), "downloaded");
+    }
+
+    #[test]
+    fn status_as_str_transcribed() {
+        assert_eq!(EpisodeStatus::Transcribed.as_str(), "transcribed");
+    }
+
+    #[test]
+    fn status_as_str_summarized() {
+        assert_eq!(EpisodeStatus::Summarized.as_str(), "summarized");
+    }
+
+    #[test]
+    fn status_as_str_failed() {
+        assert_eq!(EpisodeStatus::Failed("oops".to_string()).as_str(), "failed");
+    }
+
+    #[test]
+    fn status_roundtrip_all_variants() {
+        for (status_str, expected) in [
+            ("new", EpisodeStatus::New),
+            ("downloaded", EpisodeStatus::Downloaded),
+            ("transcribed", EpisodeStatus::Transcribed),
+            ("summarized", EpisodeStatus::Summarized),
+        ] {
+            let status = EpisodeStatus::from_db(status_str, None);
+            assert_eq!(status, expected);
+            assert_eq!(status.as_str(), status_str);
+        }
+    }
+
+    #[test]
+    fn status_failed_roundtrip() {
+        let status = EpisodeStatus::from_db("failed", Some("download error"));
+        assert_eq!(status, EpisodeStatus::Failed("download error".to_string()));
+        assert_eq!(status.as_str(), "failed");
+        assert_eq!(status.fail_reason(), Some("download error"));
+    }
+
+    #[test]
+    fn status_unknown_falls_back_to_new() {
+        let status = EpisodeStatus::from_db("bogus", None);
+        assert_eq!(status, EpisodeStatus::New);
+    }
+}
