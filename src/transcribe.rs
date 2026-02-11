@@ -12,20 +12,20 @@ use crate::config::AppConfig;
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 /// Transcribe an audio file to text using local whisper.cpp.
+///
+/// Audio is decoded and processed in chunks to limit peak memory usage,
+/// controlled by `config.transcription.chunk_minutes` (default 30, 0 = no chunking).
 pub fn transcribe(
     audio_path: &Path,
     config: &AppConfig,
     progress: Arc<AtomicI32>,
 ) -> Result<String> {
     let model_path = ensure_model(config)?;
-    let samples = audio::decode_to_whisper_format(audio_path)
-        .with_context(|| format!("Failed to decode audio: {}", audio_path.display()))?;
 
-    tracing::info!(
-        "Transcribing {} samples ({:.1}s of audio)",
-        samples.len(),
-        samples.len() as f64 / 16000.0
-    );
+    let mut decoder = audio::ChunkedAudioDecoder::open(audio_path)
+        .with_context(|| format!("Failed to open audio: {}", audio_path.display()))?;
+
+    let total_secs = decoder.total_duration_secs();
 
     let ctx = WhisperContext::new_with_params(
         model_path.to_str().unwrap_or_default(),
@@ -37,43 +37,78 @@ pub fn transcribe(
         .create_state()
         .map_err(|e| anyhow::anyhow!("Failed to create whisper state: {e}"))?;
 
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-    if let Some(ref lang) = config.transcription.language {
-        params.set_language(Some(lang));
+    let chunk_secs = if config.transcription.chunk_minutes == 0 {
+        u32::MAX
     } else {
-        params.set_language(Some("en"));
-    }
-
-    if let Some(ref prompt) = config.transcription.initial_prompt {
-        params.set_initial_prompt(prompt);
-    }
+        config.transcription.chunk_minutes * 60
+    };
 
     let pct = config.transcription.cpu_percent.clamp(1, 100);
     let n_threads = std::thread::available_parallelism()
         .map(|n| ((n.get() as u32 * pct / 100).max(1)) as i32)
         .unwrap_or(4);
-    params.set_n_threads(n_threads);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    params.set_progress_callback_safe(move |pct| {
-        progress.store(pct, Ordering::Relaxed);
-    });
-
-    state
-        .full(params, &samples)
-        .map_err(|e| anyhow::anyhow!("Whisper transcription failed: {e}"))?;
-
-    let n_segments = state.full_n_segments();
 
     let mut transcript = String::new();
-    for i in 0..n_segments {
-        if let Some(segment) = state.get_segment(i)
-            && let Ok(text) = segment.to_str_lossy()
-        {
-            transcript.push_str(&text);
+    let mut chunk_start_secs: f64 = 0.0;
+
+    while let Some(samples) = decoder.next_chunk(chunk_secs)? {
+        let chunk_duration = samples.len() as f64 / 16000.0;
+
+        tracing::info!(
+            "Transcribing chunk ({:.0}s - {:.0}s, {:.1}s of audio)",
+            chunk_start_secs,
+            chunk_start_secs + chunk_duration,
+            chunk_duration,
+        );
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+
+        if let Some(ref lang) = config.transcription.language {
+            params.set_language(Some(lang));
+        } else {
+            params.set_language(Some("en"));
         }
+
+        if let Some(ref prompt) = config.transcription.initial_prompt {
+            params.set_initial_prompt(prompt);
+        }
+
+        params.set_n_threads(n_threads);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        {
+            let progress = progress.clone();
+            let start = chunk_start_secs;
+            let dur = chunk_duration;
+            params.set_progress_callback_safe(move |chunk_pct| {
+                let overall = if let Some(total) = total_secs {
+                    ((start + chunk_pct as f64 / 100.0 * dur) / total * 100.0) as i32
+                } else {
+                    chunk_pct
+                };
+                progress.store(overall.clamp(0, 99), Ordering::Relaxed);
+            });
+        }
+
+        state
+            .full(params, &samples)
+            .map_err(|e| anyhow::anyhow!("Whisper transcription failed: {e}"))?;
+
+        // Drop the samples to free memory before extracting text
+        drop(samples);
+
+        let n_segments = state.full_n_segments();
+        for i in 0..n_segments {
+            if let Some(segment) = state.get_segment(i)
+                && let Ok(text) = segment.to_str_lossy()
+            {
+                transcript.push_str(&text);
+            }
+        }
+
+        chunk_start_secs += chunk_duration;
     }
 
     let transcript = transcript.trim().to_string();

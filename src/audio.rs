@@ -2,93 +2,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::CODEC_TYPE_NULL;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder};
+use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
-
-/// Decode an audio file to 16kHz mono f32 samples suitable for whisper.
-pub fn decode_to_whisper_format(path: &Path) -> Result<Vec<f32>> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
-
-    let source = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            source,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .with_context(|| format!("Failed to probe audio format: {}", path.display()))?;
-
-    let mut format = probed.format;
-
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| anyhow::anyhow!("No audio track found in {}", path.display()))?;
-
-    let track_id = track.id;
-    let source_rate = track.codec_params.sample_rate.unwrap_or(44100);
-    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &Default::default())
-        .with_context(|| "Failed to create audio decoder")?;
-
-    let mut all_samples: Vec<f32> = Vec::new();
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(symphonia::core::errors::Error::ResetRequired) => continue,
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let audio_buf = match decoder.decode(&packet) {
-            Ok(buf) => buf,
-            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(_) => break,
-        };
-
-        let buf = sample_buf.get_or_insert_with(|| {
-            SampleBuffer::<f32>::new(audio_buf.capacity() as u64, *audio_buf.spec())
-        });
-
-        buf.copy_interleaved_ref(audio_buf);
-        all_samples.extend_from_slice(buf.samples());
-    }
-
-    // Convert to mono if stereo
-    let mono = if channels > 1 {
-        stereo_to_mono(&all_samples, channels)
-    } else {
-        all_samples
-    };
-
-    // Resample to 16kHz if needed
-    if source_rate != WHISPER_SAMPLE_RATE {
-        Ok(resample(&mono, source_rate, WHISPER_SAMPLE_RATE))
-    } else {
-        Ok(mono)
-    }
-}
 
 fn stereo_to_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     samples
@@ -123,6 +43,140 @@ fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     }
 
     output
+}
+
+/// Streaming audio decoder that yields chunks of 16kHz mono f32 samples.
+/// This avoids loading the entire audio file into memory at once.
+pub struct ChunkedAudioDecoder {
+    format: Box<dyn FormatReader>,
+    decoder: Box<dyn Decoder>,
+    sample_buf: Option<SampleBuffer<f32>>,
+    track_id: u32,
+    source_rate: u32,
+    channels: usize,
+    total_duration_secs: Option<f64>,
+    finished: bool,
+}
+
+impl ChunkedAudioDecoder {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("Failed to open audio file: {}", path.display()))?;
+        let source = MediaSourceStream::new(Box::new(file), Default::default());
+
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                source,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .with_context(|| format!("Failed to probe audio format: {}", path.display()))?;
+
+        let format = probed.format;
+
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .ok_or_else(|| anyhow::anyhow!("No audio track found in {}", path.display()))?;
+
+        let track_id = track.id;
+        let source_rate = track.codec_params.sample_rate.unwrap_or(44100);
+        let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
+
+        let total_duration_secs = track
+            .codec_params
+            .n_frames
+            .zip(track.codec_params.time_base)
+            .map(|(n_frames, time_base)| {
+                let t = time_base.calc_time(n_frames);
+                t.seconds as f64 + t.frac
+            });
+
+        let decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &Default::default())
+            .with_context(|| "Failed to create audio decoder")?;
+
+        Ok(Self {
+            format,
+            decoder,
+            sample_buf: None,
+            track_id,
+            source_rate,
+            channels,
+            total_duration_secs,
+            finished: false,
+        })
+    }
+
+    pub fn total_duration_secs(&self) -> Option<f64> {
+        self.total_duration_secs
+    }
+
+    /// Decode up to `max_seconds` of audio, returning 16kHz mono f32 samples.
+    /// Returns `None` when the audio is exhausted.
+    pub fn next_chunk(&mut self, max_seconds: u32) -> Result<Option<Vec<f32>>> {
+        if self.finished {
+            return Ok(None);
+        }
+
+        let max_source_samples = (max_seconds as usize)
+            .saturating_mul(self.source_rate as usize)
+            .saturating_mul(self.channels);
+        let mut chunk_samples: Vec<f32> = Vec::new();
+
+        while chunk_samples.len() < max_source_samples {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(symphonia::core::errors::Error::ResetRequired) => continue,
+                Err(_) => {
+                    self.finished = true;
+                    break;
+                }
+            };
+
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+
+            let audio_buf = match self.decoder.decode(&packet) {
+                Ok(buf) => buf,
+                Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+                Err(_) => {
+                    self.finished = true;
+                    break;
+                }
+            };
+
+            let buf = self.sample_buf.get_or_insert_with(|| {
+                SampleBuffer::<f32>::new(audio_buf.capacity() as u64, *audio_buf.spec())
+            });
+            buf.copy_interleaved_ref(audio_buf);
+            chunk_samples.extend_from_slice(buf.samples());
+        }
+
+        if chunk_samples.is_empty() {
+            return Ok(None);
+        }
+
+        let mono = if self.channels > 1 {
+            stereo_to_mono(&chunk_samples, self.channels)
+        } else {
+            chunk_samples
+        };
+
+        if self.source_rate != WHISPER_SAMPLE_RATE {
+            Ok(Some(resample(&mono, self.source_rate, WHISPER_SAMPLE_RATE)))
+        } else {
+            Ok(Some(mono))
+        }
+    }
 }
 
 #[cfg(test)]

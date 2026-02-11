@@ -36,6 +36,9 @@ pub struct TranscriptionConfig {
     pub cpu_percent: u32,
     /// Post-process transcription with OpenCC Chinese conversion (e.g. "s2twp" for Simplified → Taiwan Traditional)
     pub chinese_conversion: Option<String>,
+    /// Audio chunk size in minutes for memory-efficient transcription (0 = no chunking)
+    #[serde(default = "default_chunk_minutes")]
+    pub chunk_minutes: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,6 +74,9 @@ fn default_whisper_model() -> String {
 fn default_cpu_percent() -> u32 {
     80
 }
+fn default_chunk_minutes() -> u32 {
+    30
+}
 fn default_api_base_url() -> String {
     "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
 }
@@ -103,6 +109,7 @@ impl Default for TranscriptionConfig {
             initial_prompt: None,
             cpu_percent: default_cpu_percent(),
             chinese_conversion: None,
+            chunk_minutes: default_chunk_minutes(),
         }
     }
 }

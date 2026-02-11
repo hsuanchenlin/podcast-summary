@@ -51,6 +51,12 @@ fn validate_and_apply(config: &mut AppConfig, key: &str, value: &str) -> Result<
                 .map_err(|_| anyhow::anyhow!("Expected true or false"))?;
             config.general.auto_cleanup_audio = v;
         }
+        "chunk_minutes" => {
+            let v: u32 = value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid number"))?;
+            config.transcription.chunk_minutes = v;
+        }
         "chinese_conversion" => {
             let valid = [
                 "s2t", "s2tw", "s2twp", "s2hk", "t2s", "tw2s", "tw2sp", "hk2s", "t2tw", "t2hk",
@@ -66,7 +72,7 @@ fn validate_and_apply(config: &mut AppConfig, key: &str, value: &str) -> Result<
         }
         _ => {
             anyhow::bail!(
-                "Unknown config key: {key}\n\nAvailable keys:\n  cpu_percent, whisper_model, language, initial_prompt, chinese_conversion,\n  api_base_url, api_key_env, model, max_tokens, auto_cleanup_audio"
+                "Unknown config key: {key}\n\nAvailable keys:\n  cpu_percent, whisper_model, language, initial_prompt, chinese_conversion, chunk_minutes,\n  api_base_url, api_key_env, model, max_tokens, auto_cleanup_audio"
             );
         }
     }
