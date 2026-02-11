@@ -1,0 +1,52 @@
+[package]
+name = "podcast-summarize"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tool to subscribe to podcasts, transcribe episodes, and generate AI summaries"
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["stream", "json", "blocking"] }
+
+# RSS
+feed-rs = "2"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Progress bars
+indicatif = "0.17"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Directories
+dirs = "6"
+
+# Streaming
+futures-util = "0.3"
+
+# Audio decoding
+symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "pcm"] }
+
+# Transcription (local whisper.cpp)
+whisper-rs = "0.15"
